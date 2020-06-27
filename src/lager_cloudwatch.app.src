@@ -1,0 +1,15 @@
+{application, lager_cloudwatch,
+ [{description, "AWS CloudWatch backend for Lager"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications,
+   [kernel,
+    stdlib,
+    erlcloud
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
