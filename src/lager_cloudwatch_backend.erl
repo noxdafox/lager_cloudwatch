@@ -27,7 +27,7 @@
          terminate/2,
          code_change/3]).
 
--record(state, {level :: integer(),
+-record(state, {level :: lager:log_level(),
                 log_group :: binary(),
                 log_stream :: binary(),
                 sequence_token :: atom() | binary()}).

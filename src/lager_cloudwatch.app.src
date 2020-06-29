@@ -8,7 +8,7 @@
     erlcloud
    ]},
   {env,[]},
-  {modules, []},
+  {modules, [lager_cloudwatch_backend]},
 
   {licenses, ["Apache 2.0"]},
   {links, []}
