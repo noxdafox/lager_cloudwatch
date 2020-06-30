@@ -28,8 +28,11 @@
          code_change/3]).
 
 -record(state, {level :: lager:log_level(),
+                messages :: list(),
                 log_group :: binary(),
                 log_stream :: binary(),
+                log_period :: integer(),
+                aws_config :: erlcloud_aws:aws_config(),
                 sequence_token :: atom() | binary()}).
 
 -include_lib("lager/include/lager.hrl").
@@ -37,43 +40,57 @@
 -define(LOG_GROUP, <<"logGroupName">>).
 -define(LOG_STREAM, <<"logStreamName">>).
 -define(SEQUENCE_TOKEN, <<"uploadSequenceToken">>).
+-define(MEGA_SECOND, 1000000).
+-define(SECOND, 1000).
 
 init([Level, LogGroupName, LogStreamName]) ->
+    init([Level, LogGroupName, LogStreamName, erlcloud_aws:default_config()]);
+init([Level, LogGroupName, LogStreamName, AwsConfig]) ->
+    init([Level, LogGroupName, LogStreamName, AwsConfig, ?SECOND]);
+init([Level, LogGroupName, LogStreamName, AwsConfig, LogPeriod]) ->
     GroupName = list_to_binary(LogGroupName),
     StreamName = list_to_binary(LogStreamName),
     State = #state{level = lager_util:level_to_num(Level),
+                   messages = [],
                    log_group = GroupName,
                    log_stream = StreamName,
+                   log_period = LogPeriod,
+                   aws_config = AwsConfig,
                    sequence_token = undefined},
 
-    ok = maybe_create_log_group(GroupName),
-    ok = maybe_create_log_stream(GroupName, StreamName),
+    ok = maybe_create_log_group(GroupName, AwsConfig),
+    ok = maybe_create_log_stream(GroupName, StreamName, AwsConfig),
+
+    erlang:send_after(LogPeriod, self(), publish),
 
     {ok, State}.
 
-handle_call(get_loglevel, #state{level = Level} = State) ->
-    {ok, Level, State};
-handle_call({set_loglevel, Level}, State) ->
-    {ok, ok, State#state{level = lager_util:level_to_num(Level)}};
+handle_call(get_loglevel, #state{level = Lvl} = State) ->
+    {ok, Lvl, State};
+handle_call({set_loglevel, Lvl}, State) ->
+    {ok, ok, State#state{level = lager_util:level_to_num(Lvl)}};
 handle_call(_Request, State) ->
     {ok, ok, State}.
 
 %% @private
-handle_event({log, Message}, #state{level = Level} = State) ->
-    case lager_util:is_loggable(Message, Level, ?MODULE) of
-        true ->
-            Token = case State#state.sequence_token of
-                        T when is_binary(T) -> T;
-                        undefined -> retrieve_sequence_token(State)
-                    end,
-            NewToken = publish_log_events(State, Message, Token),
-            {ok, State#state{sequence_token = NewToken}};
-        false ->
-            {ok, State}
+handle_event({log, Msg}, #state{level = Lvl, messages = Msgs} = State) ->
+    case lager_util:is_loggable(Msg, Lvl, ?MODULE) of
+        true -> {ok, State#state{messages = [Msg | Msgs]}};
+        false -> {ok, State}
     end;
 handle_event(_Event, State) ->
     {ok, State}.
 
+handle_info(publish, #state{messages = Msgs} = State) when length(Msgs) > 0 ->
+    Token = retrieve_sequence_token(State),
+    NewToken = publish_log_events(State, Msgs, Token),
+
+    erlang:send_after(State#state.log_period, self(), publish),
+
+    {ok, State#state{messages = [], sequence_token = NewToken}};
+handle_info(publish, #state{messages = []} = State) ->
+    erlang:send_after(State#state.log_period, self(), publish),
+    {ok, State};
 handle_info(_Info, State) ->
     {ok, State}.
 
@@ -85,23 +102,25 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%% Private
 
-maybe_create_log_group(LogGroupName) ->
-    case erlcloud_cloudwatch_logs:describe_log_groups(LogGroupName) of
+maybe_create_log_group(LogGroupName, AwsConfig) ->
+    case erlcloud_cloudwatch_logs:describe_log_groups(
+           LogGroupName, AwsConfig) of
         {ok, LogGroups, _} ->
             case exists(LogGroups, ?LOG_GROUP, LogGroupName) of
-                false -> erlcloud_cloudwatch_logs:create_log_group(LogGroupName);
+                false -> erlcloud_cloudwatch_logs:create_log_group(
+                           LogGroupName, AwsConfig);
                 true -> ok
             end;
         error -> error
     end.
 
-maybe_create_log_stream(LogGroupName, LogStreamName) ->
+maybe_create_log_stream(LogGroupName, LogStreamName, AwsConfig) ->
     case erlcloud_cloudwatch_logs:describe_log_streams(
-           LogGroupName, LogStreamName, erlcloud_aws:default_config()) of
+           LogGroupName, LogStreamName, AwsConfig) of
         {ok, LogStreams, _} ->
             case exists(LogStreams, ?LOG_STREAM, LogStreamName) of
                 false -> erlcloud_cloudwatch_logs:create_log_stream(
-                           LogGroupName, LogStreamName);
+                           LogGroupName, LogStreamName, AwsConfig);
                 true -> ok
             end;
         error -> error
@@ -115,22 +134,34 @@ exists([Head | _], PropertyName, ResourceName) ->
 exists([], _, _) ->
     false.
 
-retrieve_sequence_token(State) ->
+retrieve_sequence_token(#state{log_group = LogGroup,
+                               log_stream = LogStream,
+                               aws_config = AwsConfig,
+                               sequence_token = undefined}) ->
     {ok, Streams, _} = erlcloud_cloudwatch_logs:describe_log_streams(
-                         State#state.log_group,
-                         State#state.log_stream,
-                         erlcloud_aws:default_config()),
-    {_, Token} = lists:keyfind(?SEQUENCE_TOKEN, 1, hd(Streams)),
-    Token.
+                         LogGroup, LogStream, AwsConfig),
+    case lists:keyfind(?SEQUENCE_TOKEN, 1, hd(Streams)) of
+        {_, T} -> T;
+        false -> undefined
+    end;
+retrieve_sequence_token(#state{sequence_token = T}) when is_binary(T) ->
+    T.
 
-publish_log_events(State, Message, Token) ->
-    Batch = [#{timestamp => lager_msg:timestamp(Message),
-               message => convert_to_binary(lager_msg:message(Message))}],
-    erlcloud_cloudwatch_logs:put_logs_events(State#state.log_group,
-                                             State#state.log_stream,
-                                             Token,
-                                             Batch,
-                                             erlcloud_aws:default_config()).
+publish_log_events(State, Msgs, Token) ->
+    {ok, NewToken} = erlcloud_cloudwatch_logs:put_logs_events(
+                       State#state.log_group,
+                       State#state.log_stream,
+                       Token,
+                       lists:map(fun cloudwatch_message/1, lists:reverse(Msgs)),
+                       State#state.aws_config),
+    NewToken.
+
+cloudwatch_message(Msg) ->
+    #{timestamp => now_to_milliseconds(lager_msg:timestamp(Msg)),
+      message => convert_to_binary(lager_msg:message(Msg))}.
+
+now_to_milliseconds({Mega, Sec, Micro}) ->
+    (((Mega * ?MEGA_SECOND) + Sec) * ?SECOND) + (Micro div ?SECOND).
 
 convert_to_binary(V) when is_atom(V) -> convert_to_binary(atom_to_list(V));
 convert_to_binary(V) when is_integer(V) -> integer_to_binary(V);

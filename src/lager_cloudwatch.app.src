@@ -5,10 +5,11 @@
   {applications,
    [kernel,
     stdlib,
+    lager,
     erlcloud
    ]},
   {env,[]},
-  {modules, [lager_cloudwatch_backend]},
+  {modules, []},
 
   {licenses, ["Apache 2.0"]},
   {links, []}
