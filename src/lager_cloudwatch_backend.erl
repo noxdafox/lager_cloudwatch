@@ -32,7 +32,6 @@
                 log_group :: binary(),
                 log_stream :: binary(),
                 log_period :: integer(),
-                aws_config :: erlcloud_aws:aws_config(),
                 sequence_token :: atom() | binary()}).
 
 -include_lib("lager/include/lager.hrl").
@@ -44,10 +43,8 @@
 -define(SECOND, 1000).
 
 init([Level, LogGroupName, LogStreamName]) ->
-    init([Level, LogGroupName, LogStreamName, erlcloud_aws:default_config()]);
-init([Level, LogGroupName, LogStreamName, AwsConfig]) ->
-    init([Level, LogGroupName, LogStreamName, AwsConfig, ?SECOND]);
-init([Level, LogGroupName, LogStreamName, AwsConfig, LogPeriod]) ->
+    init([Level, LogGroupName, LogStreamName, ?SECOND]);
+init([Level, LogGroupName, LogStreamName, LogPeriod]) ->
     GroupName = list_to_binary(LogGroupName),
     StreamName = list_to_binary(LogStreamName),
     State = #state{level = lager_util:level_to_num(Level),
@@ -55,11 +52,10 @@ init([Level, LogGroupName, LogStreamName, AwsConfig, LogPeriod]) ->
                    log_group = GroupName,
                    log_stream = StreamName,
                    log_period = LogPeriod,
-                   aws_config = AwsConfig,
                    sequence_token = undefined},
 
-    ok = maybe_create_log_group(GroupName, AwsConfig),
-    ok = maybe_create_log_stream(GroupName, StreamName, AwsConfig),
+    ok = maybe_create_log_group(GroupName),
+    ok = maybe_create_log_stream(GroupName, StreamName),
 
     erlang:send_after(LogPeriod, self(), publish),
 
@@ -102,25 +98,23 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%% Private
 
-maybe_create_log_group(LogGroupName, AwsConfig) ->
-    case erlcloud_cloudwatch_logs:describe_log_groups(
-           LogGroupName, AwsConfig) of
+maybe_create_log_group(LogGroupName) ->
+    case erlcloud_cloudwatch_logs:describe_log_groups(LogGroupName) of
         {ok, LogGroups, _} ->
             case exists(LogGroups, ?LOG_GROUP, LogGroupName) of
-                false -> erlcloud_cloudwatch_logs:create_log_group(
-                           LogGroupName, AwsConfig);
+                false -> erlcloud_cloudwatch_logs:create_log_group(LogGroupName);
                 true -> ok
             end;
         error -> error
     end.
 
-maybe_create_log_stream(LogGroupName, LogStreamName, AwsConfig) ->
+maybe_create_log_stream(LogGroupName, LogStreamName) ->
     case erlcloud_cloudwatch_logs:describe_log_streams(
-           LogGroupName, LogStreamName, AwsConfig) of
+           LogGroupName, LogStreamName, erlcloud_aws:default_config()) of
         {ok, LogStreams, _} ->
             case exists(LogStreams, ?LOG_STREAM, LogStreamName) of
                 false -> erlcloud_cloudwatch_logs:create_log_stream(
-                           LogGroupName, LogStreamName, AwsConfig);
+                           LogGroupName, LogStreamName);
                 true -> ok
             end;
         error -> error
@@ -136,10 +130,9 @@ exists([], _, _) ->
 
 retrieve_sequence_token(#state{log_group = LogGroup,
                                log_stream = LogStream,
-                               aws_config = AwsConfig,
                                sequence_token = undefined}) ->
     {ok, Streams, _} = erlcloud_cloudwatch_logs:describe_log_streams(
-                         LogGroup, LogStream, AwsConfig),
+                         LogGroup, LogStream, erlcloud_aws:default_config()),
     case lists:keyfind(?SEQUENCE_TOKEN, 1, hd(Streams)) of
         {_, T} -> T;
         false -> undefined
@@ -153,7 +146,7 @@ publish_log_events(State, Msgs, Token) ->
                        State#state.log_stream,
                        Token,
                        lists:map(fun cloudwatch_message/1, lists:reverse(Msgs)),
-                       State#state.aws_config),
+                       erlcloud_aws:default_config()),
     NewToken.
 
 cloudwatch_message(Msg) ->
