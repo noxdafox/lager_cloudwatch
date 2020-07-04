@@ -54,6 +54,7 @@ init([Level, LogGroupName, LogStreamName, LogPeriod]) ->
                    log_period = LogPeriod,
                    sequence_token = undefined},
 
+    application:ensure_all_started(erlcloud),
     ok = maybe_create_log_group(GroupName),
     ok = maybe_create_log_stream(GroupName, StreamName),
 
