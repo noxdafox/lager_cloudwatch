@@ -10,7 +10,7 @@ Configure a Lager handler like the following:
 {lager_cloudwatch_backend, [Level, LogGroupName, LogStreamName]}
 ```
 
-The backend will take care of creating the Log Group and Stream if non existing. Make sure the service has the correct permissions to do so.
+The backend will take care of creating the Log Group and Stream if non existing. Make sure the service has the correct permissions to do so. If the `LogStreamName` is omitted, the backend will use the node name as Log Stream name.
 
 AWS CloudWatch has a fixed quota of five requests per second per each stream. To avoid being throttled, the backend batches all incoming log messages in periods of one second. The period duration can be passed as additional parameter to the handler configuration.
 

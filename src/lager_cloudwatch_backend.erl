@@ -42,6 +42,8 @@
 -define(MEGA_SECOND, 1000000).
 -define(SECOND, 1000).
 
+init([Level, LogGroupName]) ->
+    init([Level, LogGroupName, atom_to_list(node()), ?SECOND]);
 init([Level, LogGroupName, LogStreamName]) ->
     init([Level, LogGroupName, LogStreamName, ?SECOND]);
 init([Level, LogGroupName, LogStreamName, LogPeriod]) ->
