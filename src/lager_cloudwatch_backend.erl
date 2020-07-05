@@ -32,6 +32,7 @@
                 log_group :: binary(),
                 log_stream :: binary(),
                 log_period :: integer(),
+                log_formatter :: {atom(), list()},
                 sequence_token :: atom() | binary()}).
 
 -include_lib("lager/include/lager.hrl").
@@ -41,19 +42,36 @@
 -define(SEQUENCE_TOKEN, <<"uploadSequenceToken">>).
 -define(MEGA_SECOND, 1000000).
 -define(SECOND, 1000).
+-define(DEFAULT_FORMAT, ["[", severity, "] ", {pid, ""}, " ", message, "\n"]).
 
 init([Level, LogGroupName]) ->
-    init([Level, LogGroupName, atom_to_list(node()), ?SECOND]);
+    init([Level, LogGroupName, undefined, undefined, ?SECOND]);
 init([Level, LogGroupName, LogStreamName]) ->
-    init([Level, LogGroupName, LogStreamName, ?SECOND]);
-init([Level, LogGroupName, LogStreamName, LogPeriod]) ->
+    init([Level, LogGroupName, LogStreamName, undefined, ?SECOND]);
+init([Level, LogGroupName, LogStreamName, {LogFormatter, LogFormat}]) ->
+    init([Level,
+          LogGroupName,
+          LogStreamName,
+          {LogFormatter, LogFormat},
+          ?SECOND]);
+init([Level, LogGroupName, LogStreamName, LogFormatter, LogPeriod]) ->
     GroupName = list_to_binary(LogGroupName),
-    StreamName = list_to_binary(LogStreamName),
+    StreamName = case LogStreamName of
+                     N when is_list(N) -> list_to_binary(N);
+                     undefined -> atom_to_binary(node())
+                 end,
+    Formatter = case LogFormatter of
+                    {LogFormatter, LogFormat} when is_atom(LogFormatter) ->
+                        {LogFormatter, LogFormat};
+                    undefined ->
+                        {lager_default_formatter, ?DEFAULT_FORMAT}
+                end,
     State = #state{level = lager_util:level_to_num(Level),
                    messages = [],
                    log_group = GroupName,
                    log_stream = StreamName,
                    log_period = LogPeriod,
+                   log_formatter = Formatter,
                    sequence_token = undefined},
 
     application:ensure_all_started(erlcloud),
@@ -72,6 +90,7 @@ handle_call(_Request, State) ->
     {ok, ok, State}.
 
 %% @private
+
 handle_event({log, Msg}, #state{level = Lvl, messages = Msgs} = State) ->
     case lager_util:is_loggable(Msg, Lvl, ?MODULE) of
         true -> {ok, State#state{messages = [Msg | Msgs]}};
@@ -80,9 +99,14 @@ handle_event({log, Msg}, #state{level = Lvl, messages = Msgs} = State) ->
 handle_event(_Event, State) ->
     {ok, State}.
 
-handle_info(publish, #state{messages = Msgs} = State) when length(Msgs) > 0 ->
+handle_info(publish, #state{messages = Msgs,
+                            log_group = LogGroup,
+                            log_stream = LogStream,
+                            log_formatter = LogFormatter} = State)
+  when length(Msgs) > 0 ->
     Token = retrieve_sequence_token(State),
-    NewToken = publish_log_events(State, Msgs, Token),
+    FormattedMsgs = cloudwatch_messages(Msgs, LogFormatter),
+    NewToken = publish_log_events(FormattedMsgs, LogGroup, LogStream, Token),
 
     erlang:send_after(State#state.log_period, self(), publish),
 
@@ -143,23 +167,20 @@ retrieve_sequence_token(#state{log_group = LogGroup,
 retrieve_sequence_token(#state{sequence_token = T}) when is_binary(T) ->
     T.
 
-publish_log_events(State, Msgs, Token) ->
+publish_log_events(Msgs, LogGroup, LogStream, Token) ->
     {ok, NewToken} = erlcloud_cloudwatch_logs:put_logs_events(
-                       State#state.log_group,
-                       State#state.log_stream,
+                       LogGroup,
+                       LogStream,
                        Token,
-                       lists:map(fun cloudwatch_message/1, lists:reverse(Msgs)),
+                       Msgs,
                        erlcloud_aws:default_config()),
     NewToken.
 
-cloudwatch_message(Msg) ->
-    #{timestamp => now_to_milliseconds(lager_msg:timestamp(Msg)),
-      message => convert_to_binary(lager_msg:message(Msg))}.
+cloudwatch_messages(Msgs, {Formatter, Format}) ->
+    lists:map(fun(Msg) ->
+                  #{timestamp => now_to_milliseconds(lager_msg:timestamp(Msg)),
+                    message => list_to_binary(Formatter:format(Msg, Format))}
+              end, lists:reverse(Msgs)).
 
 now_to_milliseconds({Mega, Sec, Micro}) ->
     (((Mega * ?MEGA_SECOND) + Sec) * ?SECOND) + (Micro div ?SECOND).
-
-convert_to_binary(V) when is_atom(V) -> convert_to_binary(atom_to_list(V));
-convert_to_binary(V) when is_integer(V) -> integer_to_binary(V);
-convert_to_binary(V) when is_list(V) -> list_to_binary(V);
-convert_to_binary(V) when is_binary(V) -> V.
