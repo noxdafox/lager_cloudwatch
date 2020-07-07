@@ -58,7 +58,7 @@ init([Level, LogGroupName, LogStreamName, LogFormatter, LogPeriod]) ->
     GroupName = list_to_binary(LogGroupName),
     StreamName = case LogStreamName of
                      N when is_list(N) -> list_to_binary(N);
-                     undefined -> atom_to_binary(node())
+                     undefined -> atom_to_binary(node(), utf8)
                  end,
     Formatter = case LogFormatter of
                     {LogFormatter, LogFormat} when is_atom(LogFormatter) ->
